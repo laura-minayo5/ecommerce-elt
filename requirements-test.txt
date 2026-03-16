@@ -5,3 +5,6 @@ pytest==7.4.0
 pytest-mock==3.11.1
 pandas==2.0.3
 numpy==1.24.3
+psycopg2-binary==2.9.7
+snowflake-connector-python==3.1.0
+kagglehub==0.3.4
