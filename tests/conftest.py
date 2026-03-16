@@ -5,9 +5,9 @@ Provides reusable mock objects and sample DataFrames.
 import sys
 import os
 
-# add elt/ folder to Python path so tests can import extract_load_kaggle and silver_to_postgres
+# add elt/ to path so tests can import extract_load_kaggle and silver_to_postgres
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'elt'))
-# add config/ folder to Python path so elt scripts can import config.paths
+# add project root to path so config.paths can be found
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 import pytest
