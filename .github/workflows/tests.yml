@@ -10,6 +10,8 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest   # GitHub spins up a fresh Ubuntu machine
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
     steps:
       # 1. checkout your code
