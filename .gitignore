@@ -1,0 +1,34 @@
+# environment variables — never push secrets
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# dbt
+ecommerce_dbt/target/
+ecommerce_dbt/dbt_packages/
+ecommerce_dbt/logs/
+.logs/
+
+# Airflow
+airflow/logs/
+
+# data files
+data/raw/
+data/processed/
+
+# secret key file
+secret.key
+
+# kaggle cache
+.cache/
+
+# root logs
+logs/
+# IDE
+.vscode/
+.idea/

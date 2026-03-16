@@ -1,0 +1,89 @@
+# This schema.yml file defines the metadata for the dim_customers model in the gold layer of the dbt project. It includes descriptions for the model and its columns, as well as tests to ensure data quality.
+version: 2
+
+models:
+  - name: dim_customers
+    description: "One row per customer — SCD Type 0, original record kept"
+    columns:
+      - name: customer_id
+        description: "Unique customer identifier"
+        tests:
+          - unique
+          - not_null
+      - name: country
+        description: "Country of the customer at first appearance"
+        tests:
+          - not_null
+  - name: dim_products
+    description: "One row per product — SCD Type 0, original record kept"
+    columns:
+      - name: stock_code
+        description: "Unique product stock code"
+        tests:
+          - unique
+          - not_null
+      - name: description
+        description: "Product description at first appearance"
+      - name: unit_price
+        description: "Unit price at first appearance"
+        tests:
+          - not_null
+  - name: dim_date
+    description: "Date dimension — one row per calendar day covering full dataset range"
+    columns:
+      - name: date_id
+        description: "Surrogate key in YYYYMMDD format"
+        tests:
+          - unique
+          - not_null
+      - name: date
+        description: "Actual date value"
+        tests:
+          - unique
+          - not_null
+      - name: year
+        tests:
+          - not_null
+      - name: month
+        tests:
+          - not_null
+      - name: quarter
+        tests:
+          - not_null
+  - name: fact_sales
+    description: "One row per order line item — grain is invoice_no + stock_code"
+    columns:
+      - name: sales_id
+        description: "Surrogate key — MD5 hash of invoice_no + stock_code"
+        tests:
+          - unique
+          - not_null
+          - dbt_expectations.expect_column_value_lengths_to_equal:
+              value: 32  # MD5 hash is always 32 characters
+      - name: invoice_no
+        tests:
+          - not_null
+      - name: stock_code
+        tests:
+          - not_null
+      - name: customer_id
+        description: "Foreign key to dim_customers — nullable for anonymous transactions"
+      - name: date_id
+        tests:
+          - not_null
+      - name: quantity
+        tests:
+          - not_null
+      - name: unit_price
+
+      - name: quantity
+        tests:
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: 1
+              max_value: 100000
+      - name: total_price
+        tests:
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: 0
+              max_value: 200000
+      

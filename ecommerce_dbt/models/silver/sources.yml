@@ -1,0 +1,27 @@
+version: 2
+
+sources:
+  - name: bronze
+    database: ecommerce
+    schema: bronze
+    tables:
+      - name: raw_ecommerce
+        description: "This is the raw ecommerce data ingested from the snowflake staging, stored in the bronze layer. It contains all the original fields and data as it was ingested, without any transformations or cleaning applied. This table serves as the single source of truth for all downstream transformations and analyses in the silver and gold layers."
+        columns:
+          - name: InvoiceNo
+            tests:
+              - dbt_expectations.expect_column_to_exist
+              - not_null
+          - name: StockCode
+            tests:
+              - dbt_expectations.expect_column_to_exist
+              - not_null
+          - name: Quantity
+            tests:
+              - dbt_expectations.expect_column_values_to_be_of_type:
+                  column_type: varchar
+          - name: UnitPrice
+            tests:
+              - dbt_expectations.expect_column_values_to_be_of_type:
+                  column_type: varchar
+

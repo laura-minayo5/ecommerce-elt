@@ -1,0 +1,50 @@
+# describes models + defines tests
+version: 2
+
+models:
+  - name: silver_ecommerce
+    description: "Cleaned and typed ecommerce data from Bronze layer"
+    tests:
+      - unique_combination:           # replaces singular test — one row per invoice + product
+          column_1: invoice_no
+          column_2: stock_code
+    columns:
+      - name: invoice_no
+        description: "Invoice identifier — not unique alone, one invoice has many items"
+        tests:
+          - not_null
+
+      - name: stock_code
+        description: "Product stock code"
+        tests:
+          - not_null
+
+      - name: description
+        description: "Product description, trimmed of whitespace"
+        tests:
+          - not_null
+
+      - name: quantity
+        description: "Quantity ordered, cast to integer"
+        tests:
+          - not_null
+
+      - name: invoice_date
+        description: "Invoice timestamp, cast from VARCHAR"
+        tests:
+          - not_null
+
+      - name: unit_price
+        description: "Price per unit, cast to float"
+        tests:
+          - not_null
+
+      - name: country
+        description: "Customer country, trimmed of whitespace"
+        tests:
+          - not_null
+
+      - name: total_price
+        description: "quantity * unit_price derived column"
+        tests:
+          - not_null

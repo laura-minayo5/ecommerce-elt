@@ -1,0 +1,252 @@
+
+# Docker Compose — Airflow ELT Stack
+# Services boot in this order:
+#   0. init-permissions   → chowns ./data and ./sql to airflow user, Takes care of permission privilleges of mounted host folders
+#   1. postgres           → Airflow metadata DB (port 5432), starts DB, waits until healthy
+#   2. ecommerce-postgres → 3NF data warehouse (port 5433), 
+#   3. redis              → Celery broker + rate limit storage
+#   4. init-airflow       → db migrate + admin user creation
+#   5. airflow-webserver  →  Airflow UI at localhost:8080
+#   6. airflow-scheduler  → picks up and schedules tasks defined in DAGS
+#   7. airflow-worker     → executes tasks (CeleryExecutor)
+#   8. dbt                → build-only image, profiles: ["dbt"]
+#   9. PGADMIN            → (database visualization) for ERD Diagram
+
+# PERMISSIONS APPROACH:
+#   Currently using AIRFLOW_UID in .env (official Airflow method)
+#   Airflow container runs as YOUR user so no permission fights.
+#   Run once before starting: 
+#   mkdir -p ./airflow/dags ./airflow/logs ./airflow/plugins
+#   On Linux run: echo -e "AIRFLOW_UID=$(id -u)" >> .env
+
+# YAML ANCHOR 
+# &airflow-common defines a reusable block of shared config.
+# Any service that uses <<: *airflow-common gets all of this
+# pasted in automatically — like a variable for YAML.
+x-airflow-common: &airflow-common
+  build:
+    context: .                           # build context = project root
+    dockerfile: airflow/Dockerfile       # built ONCE, shared by both services
+  user: "${AIRFLOW_UID:-50000}:0"          # uses UID from .env, falls back to 50000 if .env missing (default first non-root user in linux)
+  group_add:
+    - "1001"                                 # add root group to fix permissions on /var/run/docker.sock for DockerOperator
+  environment:
+    AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW__WEBSERVER__SECRET_KEY}
+  env_file:
+    - .env
+  volumes:
+    - ./airflow/dags:/opt/airflow/dags           # your DAGs
+    - ./airflow/logs:/opt/airflow/logs           # Airflow logs
+    - ./airflow/plugins:/opt/airflow/plugins     # any custom plugins you create
+    - ./elt:/opt/elt                         # for python scripts
+    - ./config:/opt/elt/config            # needed for python to find config.paths module where the elt script is running.
+    - ./data:/opt/data                     # for any read/write data needs (e.g. CSV exports)
+    - /var/run/docker.sock:/var/run/docker.sock   # needed for DockerOperator to trigger other containers from Airflow
+    - kagglehub-cache:/home/airflow/.cache/kagglehub   # persist kaggle downloads
+  networks:
+    - ecommerce-elt-network
+  depends_on:
+    init-permissions:
+      condition: service_completed_successfully
+    init-airflow:
+      condition: service_completed_successfully   # DB must be migrated
+    postgres:
+      condition: service_healthy                  # DB must be running
+    redis:
+      condition: service_healthy                  # redis must be ready
+    ecommerce-postgres:
+      condition: service_healthy                  # ecommerce DB must be running
+
+services:
+  # 0. Takes care of permission of mounted host folders
+  init-permissions:
+    image: alpine          # lightweight Linux image — no need for full Ubuntu just to run chown
+    user: root             # must run as root to change ownership of mounted host folders
+    volumes:
+      - ./data:/opt/data           # raw + processed data files
+      - ./sql:/opt/sql             # Postgres DDL scripts
+      - kagglehub-cache:/opt/kagglehub-cache
+    entrypoint: >
+      sh -c "
+        echo 'Setting folder ownership to airflow user (50000)...' &&
+        chown -R 50000:0 /opt/data /opt/sql opt/kagglehub-cache &&
+        echo 'Setting folder permissions to 775...' &&
+        chmod -R 775 /opt/data /opt/sql opt/kagglehub-cache &&
+        echo 'Done — permissions set for all mounted folders'
+      "
+    restart: "no"          # run once and exit — not a long-running service
+
+  # 1. POSTGRES (metadata database) 
+  # Stores all Airflow metadata: DAG runs, task states, logs etc.
+  postgres:
+    image: postgres:15
+    container_name: postgres                            
+    environment:
+      POSTGRES_USER: $POSTGRES_USER             # explicit fallback if .env missing
+      POSTGRES_PASSWORD: $POSTGRES_PASSWORD
+      POSTGRES_DB: $POSTGRES_DB
+    ports:
+      - "5432:5432"                     # localhost:5432 → container:5432
+    volumes:
+      - postgres-db-volume:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "$POSTGRES_USER", "-d", "$POSTGRES_DB"]  # must match POSTGRES_USER and POSTGRES_DB from environment
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s                  # give postgres time to boot before checking
+    networks:
+      - ecommerce-elt-network
+
+  # 2. ECOMMERCE POSTGRES (data warehouse)
+  # This is where our transformed 3NF ecommerce data will live.
+  ecommerce-postgres:
+    image: postgres:15
+    container_name: ecommerce-postgres                         
+    environment:
+      POSTGRES_DB: $POSTGRES_ECOMMERCE_DB
+      POSTGRES_USER: $POSTGRES_ECOMMERCE_USER
+      POSTGRES_PASSWORD: $POSTGRES_ECOMMERCE_PASSWORD
+    ports:
+      - "5433:5432"                     # localhost:5433 → container:5432
+    volumes:  
+      - ecommerce-postgres-data:/var/lib/postgresql/data
+      - ./sql:/docker-entrypoint-initdb.d  # runs any .sql files in this folder on first start to create tables
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "$POSTGRES_ECOMMERCE_USER", "-d", "$POSTGRES_ECOMMERCE_DB"]  # checks ecommerce DB with ecommerce user
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - ecommerce-elt-network
+
+  # 3. REDIS (rate limit storage) 
+  # Stores Flask-Limiter rate limit counters for the Airflow
+  # webserver. Prevents the "in-memory storage" warning.
+  redis:
+    image: redis:7
+    container_name: redis
+    networks:
+      - ecommerce-elt-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]   # returns PONG when ready
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # 4. INIT AIRFLOW (runs once) 
+  # Migrates the DB schema and creates the admin user.
+  # Exits after completing — not a long-running service.
+  init-airflow:
+    build:
+      context: .
+      dockerfile: airflow/Dockerfile
+    container_name: init-airflow
+    environment:
+      AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW__WEBSERVER__SECRET_KEY}
+    env_file:
+      - .env
+    networks:
+      - ecommerce-elt-network
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        airflow db migrate &&
+        airflow users create \
+          --username "$AIRFLOW_ADMIN_USERNAME" \
+          --password "$AIRFLOW_ADMIN_PASSWORD" \
+          --firstname "$AIRFLOW_ADMIN_FIRSTNAME" \
+          --lastname "$AIRFLOW_ADMIN_LASTNAME" \
+          --role Admin \
+          --email "$AIRFLOW_ADMIN_EMAIL" \
+        || true
+    depends_on:
+      postgres:
+        condition: service_healthy                  # DB must be accepting connections
+
+  # 5. WEBSERVER (Airflow UI) 
+  # Inherits everything from &airflow-common above.
+  # Only adds what's unique: container_name, port, and command.
+  airflow-webserver:
+    <<: *airflow-common                  # paste all shared config from anchor
+    container_name: airflow-webserver
+    ports:
+      - "8080:8080"                      # localhost:8080 → container:8080
+    command: webserver                   # the only difference from scheduler
+
+  # 6. SCHEDULER 
+  # Inherits everything from &airflow-common above.
+  # Only adds what's unique: container_name and command.
+  airflow-scheduler:
+    <<: *airflow-common                  # paste all shared config from anchor
+    container_name: airflow-scheduler
+    command: scheduler                   # the only difference from webserver
+
+  # 7. WORKER (Celery)
+  # Picks up tasks from Redis queue and executes them.
+  # Required for CeleryExecutor — runs tasks that scheduler queues.
+  airflow-worker:
+    <<: *airflow-common
+    container_name: airflow-worker
+    command: celery worker
+    healthcheck:
+      test: ["CMD-SHELL", "celery --app airflow.executors.celery_executor.app inspect ping -d celery@$${HOSTNAME}"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    restart: always
+    
+  # 8. BUILD-ONLY IMAGE FOR DBT TRANSFORMATIONS
+  # Used by Airflow's DockerOperator to run dbt commands in a containerized environment
+  # Doesn't start with docker compose up, DockerOperator spins it up on demand instead
+  dbt:
+    build:
+      context: .
+      dockerfile: ecommerce_dbt/Dockerfile
+    image: dbt-snowflake:1.9.0
+    profiles: ["dbt"]        # excluded from docker compose up since only used as a base image for Airflow's DockerOperator, not a long-running service
+
+# 9. PGADMIN (database visualization)
+  # Web-based GUI for Postgres — used to inspect tables and generate ERD
+  # Access at: http://localhost:5050
+  # Login: admin@example.com / admin
+  # Connect to ecommerce-postgres using:
+  #   host: ecommerce-postgres (service name, NOT localhost)
+  #   port: 5432 (internal port, NOT 5433)
+  #   database: ecommerce
+  #   username: ecommerce_user
+  #   password: ecommerce3NF
+  pgadmin:
+    image: dpage/pgadmin4
+    container_name: pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:-admin@example.com}   # falls back to default if not in .env
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-admin}         # falls back to default if not in .env
+    ports:
+      - "5050:80"                    # localhost:5050 → container:80
+    volumes:
+      - pgadmin-data:/var/lib/pgadmin  # persist server connections across restarts
+    networks:
+      - ecommerce-elt-network
+    depends_on:
+      ecommerce-postgres:
+        condition: service_healthy   # ecommerce DB must be running first
+    restart: unless-stopped          # restart if it crashes, but not if manually stopped
+
+# VOLUMES 
+# Named volumes for postgres — persists DB data across restarts.
+# Deleted with: docker compose down -v
+volumes:
+  postgres-db-volume:
+  ecommerce-postgres-data:
+  kagglehub-cache:
+  pgadmin-data:
+
+# NETWORKS 
+# All services on same network so they talk by service name.
+# e.g. postgres is reachable at hostname "postgres" from airflow.
+networks:
+  ecommerce-elt-network:
+    driver: bridge

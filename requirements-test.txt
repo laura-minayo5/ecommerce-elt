@@ -1,0 +1,6 @@
+# Test dependencies for ecommerce ELT pipeline
+# Install with: pip install -r requirements-test.txt
+
+pytest==7.4.0
+pytest-mock==3.11.1
+pandas==2.0.3

@@ -1,0 +1,8 @@
+# core pipeline packages only
+kagglehub
+snowflake-sqlalchemy
+SQLAlchemy==1.4.46
+psycopg2-binary==2.9.6
+pandas==2.2.3
+numpy==1.26.4
+apache-airflow-providers-docker

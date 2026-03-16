@@ -1,0 +1,167 @@
+# This schema.yml file defines the structure and tests for the dbt models in the "marts" directory.
+# It includes three models:
+#   - mart_invoices        → flat denormalized view for invoice analysis
+#   - mart_rfm_snapshot    → RFM scores per customer per month (one row per customer per month)
+#   - mart_rfm_movement    → tracks how each customer's RFM scores and segment change month over month
+
+version: 2
+
+models:
+  - name: mart_invoices
+    description: "Flat denormalized view for invoice analysis — one row per order line item"
+    tests:
+      - unique_combination:                   # composite primary key — one row per invoice + product, more human readable
+          column_1: invoice_no
+          column_2: stock_code
+    columns:
+      - name: sales_id
+        description: "Surrogate key inherited from fact_sales — MD5 hash of invoice_no + stock_code"
+        tests:
+          - unique                             # technical key — same grain, different representation
+          - not_null
+          - dbt_expectations.expect_column_value_lengths_to_equal:
+              value: 32                        # MD5 hash is always 32 characters
+      - name: invoice_no
+        tests:
+          - not_null
+      - name: status
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['Shipped', 'Cancelled']
+      - name: stock_code
+        tests:
+          - not_null
+      - name: quantity
+        tests:
+          - not_null
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: 1
+              max_value: 100000
+      - name: total_price
+        tests:
+          - not_null
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: 0
+              max_value: 200000
+      - name: country_code
+        description: "Two letter country code from countries seed"
+
+  - name: mart_rfm_snapshot
+    description: "RFM scores per customer per month — one row per customer per snapshot_month. 
+                  Scores are cumulative (all history up to and including that month).
+                  Customers are ranked against peers within the same month using NTILE(5)."
+    tests:
+      - unique_combination:                   # composite primary key — one row per customer per month
+          column_1: customer_id
+          column_2: snapshot_month
+    columns:
+      - name: customer_id
+        tests:
+          - not_null
+      - name: snapshot_month
+        tests:
+          - not_null
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: "'2010-12-01'"        # earliest month in the dataset
+              max_value: "'2011-12-01'"        # latest month in the dataset
+      - name: most_recent_order
+        tests:
+          - not_null
+      - name: number_of_orders
+        tests:
+          - not_null
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: 1
+              max_value: 1000
+      - name: total_spent
+        tests:
+          - not_null
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: 0
+              max_value: 1000000
+      - name: recency_score
+        tests:
+          - not_null
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: 1
+              max_value: 5
+      - name: frequency_score
+        tests:
+          - not_null
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: 1
+              max_value: 5
+      - name: monetary_score
+        tests:
+          - not_null
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: 1
+              max_value: 5
+      - name: rfm_total_score
+        tests:
+          - not_null
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: 3                    # minimum possible: 1+1+1
+              max_value: 15                   # maximum possible: 5+5+5
+      - name: customer_segment
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['Champion', 'Loyal Customer', 'New Customer', 'At Risk', 'Lost', 'Potential Loyalist']
+
+  - name: mart_rfm_movement
+    description: "Month over month RFM movement per customer — one row per customer per snapshot_month.
+                  Uses LAG to compare current month scores and segment against the previous month.
+                  Tracks score deltas, spend changes, and segment transitions over time."
+    tests:
+      - unique_combination:                   # composite primary key — one row per customer per month
+          column_1: customer_id
+          column_2: snapshot_month
+    columns:
+      - name: customer_id
+        tests:
+          - not_null
+      - name: snapshot_month
+        tests:
+          - not_null
+      - name: recency_score
+        tests:
+          - not_null
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: 1
+              max_value: 5
+      - name: frequency_score
+        tests:
+          - not_null
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: 1
+              max_value: 5
+      - name: monetary_score
+        tests:
+          - not_null
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: 1
+              max_value: 5
+      - name: rfm_total_score
+        tests:
+          - not_null
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: 3
+              max_value: 15
+      - name: customer_segment
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['Champion', 'Loyal Customer', 'New Customer', 'At Risk', 'Lost', 'Potential Loyalist']
+      - name: segment_movement
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['New', 'Stable', 'Upgraded', 'Downgraded', 'Lateral']
+      - name: segment_transition
+        description: "Human readable label showing the customer's journey e.g. 'Loyal Customer → At Risk'"
+        tests:
+          - not_null
+          - dbt_expectations.expect_column_values_to_match_regex:
+              regex: ".+ → .+"               # must contain ' → ' with values on both sides
